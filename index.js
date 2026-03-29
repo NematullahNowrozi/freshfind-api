@@ -194,6 +194,78 @@ app.post('/api/sync/fuel', async (req, res) => {
   res.json({ message: 'Fuel sync complete' });
 });
 
+// Geocode an address to lat/lng
+app.get('/api/geocode', async (req, res) => {
+  const { address } = req.query;
+  if (!address) {
+    return res.status(400).json({ error: 'address is required' });
+  }
+  try {
+    const response = await fetch(
+      `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${process.env.GOOGLE_MAPS_KEY}`
+    );
+    const data = await response.json();
+    if (data.status !== 'OK') {
+      return res.status(400).json({ error: 'Address not found' });
+    }
+    const { lat, lng } = data.results[0].geometry.location;
+    const formatted = data.results[0].formatted_address;
+    res.json({ lat, lng, formatted_address: formatted });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Find cheapest fuel near an address
+app.get('/api/fuel/near-address', async (req, res) => {
+  const { address, type = 'unleaded', radius = 5 } = req.query;
+  if (!address) {
+    return res.status(400).json({ error: 'address is required' });
+  }
+  try {
+    // Step 1 — geocode the address
+    const geoRes = await fetch(
+      `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${process.env.GOOGLE_MAPS_KEY}`
+    );
+    const geoData = await geoRes.json();
+    if (geoData.status !== 'OK') {
+      return res.status(400).json({ error: 'Address not found' });
+    }
+    const { lat, lng } = geoData.results[0].geometry.location;
+
+    // Step 2 — find nearby stations
+    const latRange = parseFloat(radius) / 111;
+    const lngRange = parseFloat(radius) / 85;
+    const validTypes = ['unleaded', 'e10', 'diesel', 'premium', 'lpg'];
+    const fuelType = validTypes.includes(type) ? type : 'unleaded';
+
+    const { data, error } = await supabase
+      .from('fuel_stations')
+      .select('*')
+      .not(fuelType, 'is', null)
+      .gte('lat', lat - latRange)
+      .lte('lat', lat + latRange)
+      .gte('lng', lng - lngRange)
+      .lte('lng', lng + lngRange)
+      .order(fuelType, { ascending: true })
+      .limit(20);
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    res.json({
+      address: geoData.results[0].formatted_address,
+      lat,
+      lng,
+      fuel_type: fuelType,
+      radius_km: radius,
+      count: data.length,
+      stations: data
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 cron.schedule('*/30 * * * *', () => {
   syncFuelPrices();
 });

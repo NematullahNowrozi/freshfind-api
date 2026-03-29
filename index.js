@@ -75,7 +75,7 @@ async function syncFuelPrices() {
   const code = p.stationcode || p.stationCode || p.station_code || p.code;
   if (!code) return;
   if (!priceMap[code]) priceMap[code] = {};
-  priceMap[code][p.fueltype] = p.price / 10;
+  priceMap[code][p.fueltype] = p.price;
 });
 
     const seen = new Set();

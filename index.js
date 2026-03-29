@@ -14,32 +14,31 @@ const supabase = createClient(
 );
 
 const FUEL_API_KEY = process.env.FUEL_API_KEY;
-const FUEL_API_BASE = 'https://api.fuelcheck.nsw.gov.au/ajax/fuel';
 
 async function syncFuelPrices() {
   console.log('Syncing NSW fuel prices...');
   try {
-    const stationsRes = await fetch(`${FUEL_API_BASE}/stations`, {
-      headers: {
-        'apikey': FUEL_API_KEY,
-        'Content-Type': 'application/json',
-        'requesttimestamp': new Date().toISOString(),
-        'transactionid': `freshfind-${Date.now()}`
+    const response = await fetch(
+      'https://api.fuelcheck.nsw.gov.au/ajax/fuel/GetCountryPrices/CTY1',
+      {
+        method: 'GET',
+        headers: {
+          'apikey': FUEL_API_KEY,
+          'requesttimestamp': new Date().toUTCString(),
+          'transactionid': '1'
+        }
       }
-    });
-    const stationsData = await stationsRes.json();
-    const stations = stationsData.stations || [];
+    );
 
-    const pricesRes = await fetch(`${FUEL_API_BASE}/prices`, {
-      headers: {
-        'apikey': FUEL_API_KEY,
-        'Content-Type': 'application/json',
-        'requesttimestamp': new Date().toISOString(),
-        'transactionid': `freshfind-prices-${Date.now()}`
-      }
-    });
-    const pricesData = await pricesRes.json();
-    const prices = pricesData.prices || [];
+    console.log('API response status:', response.status);
+    const text = await response.text();
+    console.log('Raw response:', text.substring(0, 200));
+
+    const data = JSON.parse(text);
+    const stations = data.stations || [];
+    const prices = data.prices || [];
+
+    console.log(`Found ${stations.length} stations, ${prices.length} prices`);
 
     const priceMap = {};
     prices.forEach(p => {
@@ -63,12 +62,16 @@ async function syncFuelPrices() {
       updated_at: new Date().toISOString()
     }));
 
-    const { error } = await supabase
-      .from('fuel_stations')
-      .upsert(rows, { onConflict: 'name,address' });
+    if (rows.length > 0) {
+      const { error } = await supabase
+        .from('fuel_stations')
+        .upsert(rows, { onConflict: 'name,address' });
+      if (error) throw error;
+      console.log(`Synced ${rows.length} fuel stations`);
+    } else {
+      console.log('No stations to sync');
+    }
 
-    if (error) throw error;
-    console.log(`Synced ${rows.length} fuel stations`);
   } catch (err) {
     console.error('Fuel sync error:', err.message);
   }

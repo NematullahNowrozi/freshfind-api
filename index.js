@@ -13,26 +13,65 @@ const supabase = createClient(
   process.env.SUPABASE_KEY
 );
 
-const FUEL_API_KEY = process.env.FUEL_API_KEY;
+const CONSUMER_KEY = process.env.FUEL_CONSUMER_KEY;
+const CONSUMER_SECRET = process.env.FUEL_CONSUMER_SECRET;
 
+let accessToken = null;
+let tokenExpiry = null;
+
+// ── STEP 1: Get OAuth token ──────────────────────────────────
+async function getAccessToken() {
+  if (accessToken && tokenExpiry && Date.now() < tokenExpiry) {
+    return accessToken;
+  }
+
+  console.log('Fetching new OAuth token...');
+  const credentials = Buffer.from(`${CONSUMER_KEY}:${CONSUMER_SECRET}`).toString('base64');
+
+  const response = await fetch(
+    'https://api.fuelcheck.nsw.gov.au/oauth/client_credential/accesstoken?grant_type=client_credentials',
+    {
+      method: 'GET',
+      headers: {
+        'Authorization': `Basic ${credentials}`,
+        'Content-Type': 'application/json'
+      }
+    }
+  );
+
+  const text = await response.text();
+  console.log('Token response status:', response.status);
+  console.log('Token response:', text.substring(0, 200));
+
+  const data = JSON.parse(text);
+  accessToken = data.access_token;
+  tokenExpiry = Date.now() + (11 * 60 * 60 * 1000); // 11 hours
+  console.log('Got access token successfully');
+  return accessToken;
+}
+
+// ── STEP 2: Sync fuel prices ─────────────────────────────────
 async function syncFuelPrices() {
   console.log('Syncing NSW fuel prices...');
   try {
+    const token = await getAccessToken();
+
     const response = await fetch(
       'https://api.fuelcheck.nsw.gov.au/ajax/fuel/GetCountryPrices/CTY1',
       {
         method: 'GET',
         headers: {
-          'apikey': FUEL_API_KEY,
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
           'requesttimestamp': new Date().toUTCString(),
           'transactionid': '1'
         }
       }
     );
 
-    console.log('API response status:', response.status);
+    console.log('Prices response status:', response.status);
     const text = await response.text();
-    console.log('Raw response:', text.substring(0, 200));
+    console.log('Raw response preview:', text.substring(0, 200));
 
     const data = JSON.parse(text);
     const stations = data.stations || [];
@@ -67,16 +106,18 @@ async function syncFuelPrices() {
         .from('fuel_stations')
         .upsert(rows, { onConflict: 'name,address' });
       if (error) throw error;
-      console.log(`Synced ${rows.length} fuel stations`);
+      console.log(`✅ Synced ${rows.length} fuel stations`);
     } else {
-      console.log('No stations to sync');
+      console.log('No stations found in response');
     }
 
   } catch (err) {
     console.error('Fuel sync error:', err.message);
+    accessToken = null; // reset token so it refreshes next attempt
   }
 }
 
+// ── ROUTES ───────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
     status: '✅ FreshFind API running',
@@ -144,10 +185,12 @@ app.post('/api/sync/fuel', async (req, res) => {
   res.json({ message: 'Fuel sync complete' });
 });
 
+// ── SCHEDULER — every 30 mins ────────────────────────────────
 cron.schedule('*/30 * * * *', () => {
   syncFuelPrices();
 });
 
+// ── START ────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`FreshFind API running on port ${PORT}`);

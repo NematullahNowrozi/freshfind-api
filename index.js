@@ -76,13 +76,14 @@ async function syncFuelPrices() {
       priceMap[p.stationcode][p.fueltype] = p.price / 10;
     });
 
-    // ── Deduplicate by name+address before inserting ──
     const seen = new Set();
     const rows = [];
     for (const s of stations) {
       const key = `${s.name}||${s.address}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const sp = priceMap[s.stationcode] || {};
+      console.log(`Station ${s.stationcode} prices:`, JSON.stringify(sp));
       rows.push({
         name: s.name,
         brand: s.brand,
@@ -91,18 +92,17 @@ async function syncFuelPrices() {
         state: 'NSW',
         lat: parseFloat(s.location?.latitude || 0),
         lng: parseFloat(s.location?.longitude || 0),
-        unleaded: priceMap[s.stationcode]?.['U91'] || null,
-        e10: priceMap[s.stationcode]?.['E10'] || null,
-        diesel: priceMap[s.stationcode]?.['DL'] || null,
-        premium: priceMap[s.stationcode]?.['U95'] || null,
-        lpg: priceMap[s.stationcode]?.['LPG'] || null,
+        unleaded: sp['U91'] || sp['ULP'] || sp['PULP'] || null,
+        e10: sp['E10'] || null,
+        diesel: sp['DL'] || sp['DSL'] || sp['DIESEL'] || null,
+        premium: sp['U95'] || sp['P95'] || sp['U98'] || sp['P98'] || null,
+        lpg: sp['LPG'] || null,
         updated_at: new Date().toISOString()
       });
     }
 
     console.log(`Inserting ${rows.length} deduplicated stations...`);
 
-    // ── Insert in batches of 100 to avoid timeout ──
     const batchSize = 100;
     for (let i = 0; i < rows.length; i += batchSize) {
       const batch = rows.slice(i, i + batchSize);

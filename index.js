@@ -19,14 +19,11 @@ const FUEL_AUTH_HEADER = process.env.FUEL_AUTH_HEADER;
 let accessToken = null;
 let tokenExpiry = null;
 
-// ── STEP 1: Get OAuth token ──────────────────────────────────
 async function getAccessToken() {
   if (accessToken && tokenExpiry && Date.now() < tokenExpiry) {
     return accessToken;
   }
-
   console.log('Fetching new OAuth token...');
-
   const response = await fetch(
     'https://api.onegov.nsw.gov.au/oauth/client_credential/accesstoken?grant_type=client_credentials',
     {
@@ -37,11 +34,8 @@ async function getAccessToken() {
       }
     }
   );
-
   const text = await response.text();
   console.log('Token status:', response.status);
-  console.log('Token response:', text.substring(0, 300));
-
   const data = JSON.parse(text);
   accessToken = data.access_token;
   tokenExpiry = Date.now() + (11 * 60 * 60 * 1000);
@@ -49,7 +43,6 @@ async function getAccessToken() {
   return accessToken;
 }
 
-// ── STEP 2: Sync fuel prices ─────────────────────────────────
 async function syncFuelPrices() {
   console.log('Syncing NSW fuel prices...');
   try {
@@ -63,16 +56,14 @@ async function syncFuelPrices() {
           'Authorization': `Bearer ${token}`,
           'apikey': FUEL_API_KEY,
           'Content-Type': 'application/json',
-          'requesttimestamp': new Date().toUTCString(),
-          'transactionid': '1'
+          'requesttimestamp': new Date().toISOString(),
+          'transactionid': `freshfind-${Date.now()}`
         }
       }
     );
 
     console.log('Prices response status:', response.status);
     const text = await response.text();
-    console.log('Raw response preview:', text.substring(0, 300));
-
     const data = JSON.parse(text);
     const stations = data.stations || [];
     const prices = data.prices || [];
@@ -85,31 +76,47 @@ async function syncFuelPrices() {
       priceMap[p.stationcode][p.fueltype] = p.price / 10;
     });
 
-    const rows = stations.map(s => ({
-      name: s.name,
-      brand: s.brand,
-      address: s.address,
-      suburb: s.suburb,
-      state: 'NSW',
-      lat: parseFloat(s.location?.latitude || 0),
-      lng: parseFloat(s.location?.longitude || 0),
-      unleaded: priceMap[s.stationcode]?.['U91'] || null,
-      e10: priceMap[s.stationcode]?.['E10'] || null,
-      diesel: priceMap[s.stationcode]?.['DL'] || null,
-      premium: priceMap[s.stationcode]?.['U95'] || null,
-      lpg: priceMap[s.stationcode]?.['LPG'] || null,
-      updated_at: new Date().toISOString()
-    }));
+    // ── Deduplicate by name+address before inserting ──
+    const seen = new Set();
+    const rows = [];
+    for (const s of stations) {
+      const key = `${s.name}||${s.address}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({
+        name: s.name,
+        brand: s.brand,
+        address: s.address,
+        suburb: s.suburb,
+        state: 'NSW',
+        lat: parseFloat(s.location?.latitude || 0),
+        lng: parseFloat(s.location?.longitude || 0),
+        unleaded: priceMap[s.stationcode]?.['U91'] || null,
+        e10: priceMap[s.stationcode]?.['E10'] || null,
+        diesel: priceMap[s.stationcode]?.['DL'] || null,
+        premium: priceMap[s.stationcode]?.['U95'] || null,
+        lpg: priceMap[s.stationcode]?.['LPG'] || null,
+        updated_at: new Date().toISOString()
+      });
+    }
 
-    if (rows.length > 0) {
+    console.log(`Inserting ${rows.length} deduplicated stations...`);
+
+    // ── Insert in batches of 100 to avoid timeout ──
+    const batchSize = 100;
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const batch = rows.slice(i, i + batchSize);
       const { error } = await supabase
         .from('fuel_stations')
-        .upsert(rows, { onConflict: 'name,address' });
-      if (error) throw error;
-      console.log(`✅ Synced ${rows.length} fuel stations`);
-    } else {
-      console.log('No stations found in response');
+        .upsert(batch, { onConflict: 'name,address' });
+      if (error) {
+        console.error(`Batch ${i / batchSize + 1} error:`, error.message);
+      } else {
+        console.log(`✅ Batch ${i / batchSize + 1} inserted`);
+      }
     }
+
+    console.log(`✅ Sync complete — ${rows.length} stations`);
 
   } catch (err) {
     console.error('Fuel sync error:', err.message);
@@ -117,7 +124,6 @@ async function syncFuelPrices() {
   }
 }
 
-// ── ROUTES ───────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
     status: '✅ FreshFind API running',
@@ -185,12 +191,10 @@ app.post('/api/sync/fuel', async (req, res) => {
   res.json({ message: 'Fuel sync complete' });
 });
 
-// ── SCHEDULER — every 30 mins ────────────────────────────────
 cron.schedule('*/30 * * * *', () => {
   syncFuelPrices();
 });
 
-// ── START ────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`FreshFind API running on port ${PORT}`);

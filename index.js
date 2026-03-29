@@ -71,10 +71,12 @@ async function syncFuelPrices() {
     console.log(`Found ${stations.length} stations, ${prices.length} prices`);
 
     const priceMap = {};
-    prices.forEach(p => {
-      if (!priceMap[p.stationcode]) priceMap[p.stationcode] = {};
-      priceMap[p.stationcode][p.fueltype] = p.price / 10;
-    });
+   prices.forEach(p => {
+  const code = p.stationcode || p.stationCode || p.station_code || p.code;
+  if (!code) return;
+  if (!priceMap[code]) priceMap[code] = {};
+  priceMap[code][p.fueltype] = p.price / 10;
+});
 
     const seen = new Set();
     const rows = [];
@@ -82,8 +84,9 @@ async function syncFuelPrices() {
       const key = `${s.name}||${s.address}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const sp = priceMap[s.stationcode] || {};
-      console.log(`Station ${s.stationcode} prices:`, JSON.stringify(sp));
+    const code = s.stationcode || s.stationCode || s.station_code || s.code;
+const sp = priceMap[code] || {};
+console.log(`Station ${code} prices:`, JSON.stringify(sp));
       rows.push({
         name: s.name,
         brand: s.brand,

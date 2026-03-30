@@ -15,15 +15,26 @@ const supabase = createClient(
 
 const FUEL_API_KEY = process.env.FUEL_API_KEY;
 const FUEL_AUTH_HEADER = process.env.FUEL_AUTH_HEADER;
+const GOOGLE_MAPS_KEY = process.env.GOOGLE_MAPS_KEY;
 
 let accessToken = null;
 let tokenExpiry = null;
 
+// ── SYNC WINDOW CHECK (6am–10pm AEST) ────────────────────────
+function isSyncWindow() {
+  const aest = new Date(new Date().toLocaleString('en-US', { timeZone: 'Australia/Sydney' }));
+  const hour = aest.getHours();
+  return hour >= 6 && hour < 22;
+}
+
+function aestTime() {
+  return new Date().toLocaleString('en-AU', { timeZone: 'Australia/Sydney' });
+}
+
+// ── OAUTH TOKEN ───────────────────────────────────────────────
 async function getAccessToken() {
-  if (accessToken && tokenExpiry && Date.now() < tokenExpiry) {
-    return accessToken;
-  }
-  console.log('Fetching new OAuth token...');
+  if (accessToken && tokenExpiry && Date.now() < tokenExpiry) return accessToken;
+  console.log(`[${aestTime()}] Fetching new OAuth token...`);
   const response = await fetch(
     'https://api.onegov.nsw.gov.au/oauth/client_credential/accesstoken?grant_type=client_credentials',
     {
@@ -34,20 +45,22 @@ async function getAccessToken() {
       }
     }
   );
-  const text = await response.text();
-  console.log('Token status:', response.status);
-  const data = JSON.parse(text);
+  const data = JSON.parse(await response.text());
   accessToken = data.access_token;
   tokenExpiry = Date.now() + (11 * 60 * 60 * 1000);
-  console.log('✅ Got access token');
+  console.log(`[${aestTime()}] OAuth token obtained`);
   return accessToken;
 }
 
+// ── FUEL SYNC ─────────────────────────────────────────────────
 async function syncFuelPrices() {
-  console.log('Syncing NSW fuel prices...');
+  if (!isSyncWindow()) {
+    console.log(`[${aestTime()}] Outside sync window — skipping`);
+    return;
+  }
+  console.log(`[${aestTime()}] Starting fuel sync...`);
   try {
     const token = await getAccessToken();
-
     const response = await fetch(
       'https://api.onegov.nsw.gov.au/FuelPriceCheck/v2/fuel/prices',
       {
@@ -62,21 +75,18 @@ async function syncFuelPrices() {
       }
     );
 
-    console.log('Prices response status:', response.status);
-    const text = await response.text();
-    const data = JSON.parse(text);
+    const data = JSON.parse(await response.text());
     const stations = data.stations || [];
     const prices = data.prices || [];
-
-    console.log(`Found ${stations.length} stations, ${prices.length} prices`);
+    console.log(`[${aestTime()}] API returned ${stations.length} stations, ${prices.length} prices`);
 
     const priceMap = {};
-   prices.forEach(p => {
-  const code = p.stationcode || p.stationCode || p.station_code || p.code;
-  if (!code) return;
-  if (!priceMap[code]) priceMap[code] = {};
-  priceMap[code][p.fueltype] = p.price;
-});
+    prices.forEach(p => {
+      const code = p.stationcode || p.stationCode || p.code;
+      if (!code) return;
+      if (!priceMap[code]) priceMap[code] = {};
+      priceMap[code][p.fueltype] = p.price;
+    });
 
     const seen = new Set();
     const rows = [];
@@ -84,194 +94,4 @@ async function syncFuelPrices() {
       const key = `${s.name}||${s.address}`;
       if (seen.has(key)) continue;
       seen.add(key);
-    const code = s.stationcode || s.stationCode || s.station_code || s.code;
-const sp = priceMap[code] || {};
-console.log(`Station ${code} prices:`, JSON.stringify(sp));
-      rows.push({
-        name: s.name,
-        brand: s.brand,
-        address: s.address,
-        suburb: s.suburb,
-        state: 'NSW',
-        lat: parseFloat(s.location?.latitude || 0),
-        lng: parseFloat(s.location?.longitude || 0),
-        unleaded: sp['U91'] || sp['ULP'] || sp['PULP'] || null,
-        e10: sp['E10'] || null,
-        diesel: sp['DL'] || sp['DSL'] || sp['DIESEL'] || null,
-        premium: sp['U95'] || sp['P95'] || sp['U98'] || sp['P98'] || null,
-        lpg: sp['LPG'] || null,
-        updated_at: new Date().toISOString()
-      });
-    }
-
-    console.log(`Inserting ${rows.length} deduplicated stations...`);
-
-    const batchSize = 100;
-    for (let i = 0; i < rows.length; i += batchSize) {
-      const batch = rows.slice(i, i + batchSize);
-      const { error } = await supabase
-        .from('fuel_stations')
-        .upsert(batch, { onConflict: 'name,address' });
-      if (error) {
-        console.error(`Batch ${i / batchSize + 1} error:`, error.message);
-      } else {
-        console.log(`✅ Batch ${i / batchSize + 1} inserted`);
-      }
-    }
-
-    console.log(`✅ Sync complete — ${rows.length} stations`);
-
-  } catch (err) {
-    console.error('Fuel sync error:', err.message);
-    accessToken = null;
-  }
-}
-
-app.get('/', (req, res) => {
-  res.json({
-    status: '✅ FreshFind API running',
-    time: new Date(),
-    endpoints: [
-      'GET /api/fuel',
-      'GET /api/fuel/cheapest?type=unleaded',
-      'GET /api/fuel/nearby?lat=X&lng=Y&radius=5',
-      'POST /api/sync/fuel'
-    ]
-  });
-});
-
-app.get('/api/fuel', async (req, res) => {
-  const { suburb, brand } = req.query;
-  let query = supabase
-    .from('fuel_stations')
-    .select('*')
-    .order('unleaded', { ascending: true });
-  if (suburb) query = query.ilike('suburb', `%${suburb}%`);
-  if (brand) query = query.ilike('brand', `%${brand}%`);
-  const { data, error } = await query;
-  if (error) return res.status(500).json({ error: error.message });
-  res.json({ count: data.length, stations: data });
-});
-
-app.get('/api/fuel/cheapest', async (req, res) => {
-  const type = req.query.type || 'unleaded';
-  const limit = parseInt(req.query.limit) || 10;
-  const validTypes = ['unleaded', 'e10', 'diesel', 'premium', 'lpg'];
-  if (!validTypes.includes(type)) {
-    return res.status(400).json({ error: 'Invalid fuel type' });
-  }
-  const { data, error } = await supabase
-    .from('fuel_stations')
-    .select('*')
-    .not(type, 'is', null)
-    .order(type, { ascending: true })
-    .limit(limit);
-  if (error) return res.status(500).json({ error: error.message });
-  res.json({ type, count: data.length, stations: data });
-});
-
-app.get('/api/fuel/nearby', async (req, res) => {
-  const { lat, lng, radius = 5 } = req.query;
-  if (!lat || !lng) {
-    return res.status(400).json({ error: 'lat and lng required' });
-  }
-  const latRange = parseFloat(radius) / 111;
-  const lngRange = parseFloat(radius) / 85;
-  const { data, error } = await supabase
-    .from('fuel_stations')
-    .select('*')
-    .gte('lat', parseFloat(lat) - latRange)
-    .lte('lat', parseFloat(lat) + latRange)
-    .gte('lng', parseFloat(lng) - lngRange)
-    .lte('lng', parseFloat(lng) + lngRange)
-    .order('unleaded', { ascending: true });
-  if (error) return res.status(500).json({ error: error.message });
-  res.json({ count: data.length, stations: data });
-});
-
-app.post('/api/sync/fuel', async (req, res) => {
-  await syncFuelPrices();
-  res.json({ message: 'Fuel sync complete' });
-});
-
-// Geocode an address to lat/lng
-app.get('/api/geocode', async (req, res) => {
-  const { address } = req.query;
-  if (!address) {
-    return res.status(400).json({ error: 'address is required' });
-  }
-  try {
-    const response = await fetch(
-      `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${process.env.GOOGLE_MAPS_KEY}`
-    );
-    const data = await response.json();
-    if (data.status !== 'OK') {
-      return res.status(400).json({ error: 'Address not found' });
-    }
-    const { lat, lng } = data.results[0].geometry.location;
-    const formatted = data.results[0].formatted_address;
-    res.json({ lat, lng, formatted_address: formatted });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Find cheapest fuel near an address
-app.get('/api/fuel/near-address', async (req, res) => {
-  const { address, type = 'unleaded', radius = 5 } = req.query;
-  if (!address) {
-    return res.status(400).json({ error: 'address is required' });
-  }
-  try {
-    // Step 1 — geocode the address
-    const geoRes = await fetch(
-      `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${process.env.GOOGLE_MAPS_KEY}`
-    );
-    const geoData = await geoRes.json();
-    if (geoData.status !== 'OK') {
-      return res.status(400).json({ error: 'Address not found' });
-    }
-    const { lat, lng } = geoData.results[0].geometry.location;
-
-    // Step 2 — find nearby stations
-    const latRange = parseFloat(radius) / 111;
-    const lngRange = parseFloat(radius) / 85;
-    const validTypes = ['unleaded', 'e10', 'diesel', 'premium', 'lpg'];
-    const fuelType = validTypes.includes(type) ? type : 'unleaded';
-
-    const { data, error } = await supabase
-      .from('fuel_stations')
-      .select('*')
-      .not(fuelType, 'is', null)
-      .gte('lat', lat - latRange)
-      .lte('lat', lat + latRange)
-      .gte('lng', lng - lngRange)
-      .lte('lng', lng + lngRange)
-      .order(fuelType, { ascending: true })
-      .limit(20);
-
-    if (error) return res.status(500).json({ error: error.message });
-
-    res.json({
-      address: geoData.results[0].formatted_address,
-      lat,
-      lng,
-      fuel_type: fuelType,
-      radius_km: radius,
-      count: data.length,
-      stations: data
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-cron.schedule('*/30 * * * *', () => {
-  syncFuelPrices();
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`FreshFind API running on port ${PORT}`);
-  syncFuelPrices();
-});
+      const c
